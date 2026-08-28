@@ -11,6 +11,7 @@ import tts as _tts
 # ── Globals ───────────────────────────────────────────────────────────
 _sub_windows: list = []   # keep refs to avoid GC
 _opening_sub: list = [False]  # True trong khi _open_sub chạy
+_dragging:    list = [False]  # True khi user đang drag header (block focus-out)
 _main_app    = None       # Gtk.Application of main popup
 _css_done    = False
 
@@ -69,7 +70,35 @@ def _ins(buf, text, *tgs):
     buf.insert_with_tags(buf.get_end_iter(), text, *tgs)
 
 # ── Header ────────────────────────────────────────────────────────────
-def _hdr(root, text, width, close_fn, extra_btns=None):
+def _make_draggable(widget, win):
+    """Cho phép kéo popup bằng cách giữ chuột trên widget (header)."""
+    click = Gtk.GestureClick()
+    click.set_button(1)
+    def on_press(gesture, n_press, x, y):
+        if n_press != 1:
+            return
+        # Block focus-out trong suốt thời gian drag (1.5s > 900ms của 2-stage)
+        _dragging[0] = True
+        GLib.timeout_add(1500, lambda: _dragging.__setitem__(0, False) or False)
+        surface = win.get_surface()
+        seq   = gesture.get_last_updated_sequence()
+        event = gesture.get_last_event(seq)
+        if not surface or not event:
+            return
+        # Wayland: nhờ compositor xử lý việc di chuyển window
+        for method in ("begin_interactive_move", "begin_move"):
+            fn = getattr(surface, method, None)
+            if fn:
+                try:
+                    fn(gesture.get_device(), 1, x, y, event.get_time())
+                    break
+                except Exception:
+                    pass
+    click.connect("pressed", on_press)
+    widget.add_controller(click)
+    widget.set_cursor(Gdk.Cursor.new_from_name("grab"))
+
+def _hdr(root, text, width, close_fn, win=None, extra_btns=None):
     box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
     box.add_css_class("hdr")
     lbl = Gtk.Label(label=f'🔍 "{text}"')
@@ -85,34 +114,67 @@ def _hdr(root, text, width, close_fn, extra_btns=None):
     b = Gtk.Button(label="✕"); b.add_css_class("ibtn")
     b.connect("clicked", lambda _: close_fn())
     box.append(b)
+    if win:
+        _make_draggable(lbl, win)   # chỉ label area, KHÔNG phải toàn box (buttons sẽ bị block)
     root.append(box)
 
 # ── Focus / ESC ───────────────────────────────────────────────────────
-def _focus_esc(win, guard_fn=None):
-    """Close popup on focus-loss. Workspace switch = no surface focused → keep."""
+def _focus_esc(win, guard_fn=None, on_close=None):
+    """
+    ── FOCUS-OUT CLOSE — ĐỌC TRƯỚC KHI SỬA ──────────────────────────────
+
+    Mục tiêu hành vi:
+      ✓ Click app khác / click desktop     → đóng popup
+      ✓ Switch workspace (Ctrl+Alt+←/→)    → GIỮ popup
+      ✓ Có sub-popup đang mở               → KHÔNG đóng primary (guard_fn)
+      ✓ ESC                                → đóng popup
+
+    WAYLAND NOTE — Tại sao cần 2 stage:
+      Trên GNOME Wayland, get_focused_surface() LUÔN trả về None vì
+      security policy. Không thể dùng nó để phân biệt:
+        - "User click app khác" (is_active = False mãi mãi)
+        - "User switch workspace" (is_active = False tạm thời, rồi True lại)
+
+      → Giải pháp 2-stage delay:
+        Stage 1 (200ms): is_active() = False → chưa chắc, đợi thêm
+        Stage 2 (700ms sau stage1 = 900ms total): is_active() vẫn False → đóng
+        Nếu user switch workspace rồi quay lại, is_active() = True ở stage2 → giữ
+
+    ❌ ĐỪNG đơn giản hóa thành 1 lần check (150ms/200ms):
+       → Workspace switch bị đóng oan vì 150ms quá ngắn.
+
+    ❌ ĐỪNG bỏ guard_fn (hoặc đổi thành _opening_sub only):
+       → Primary bị đóng ngay khi sub-popup vừa mở (focus shift sang sub).
+       → guard_fn = lambda: bool(_sub_windows) bảo vệ primary khi sub tồn tại.
+
+    ❌ ĐỪNG dùng guard_fn=None cho sub và on_close đóng primary luôn:
+       → Nếu sub A mở sub B: A mất focus → stage2 kích hoạt → on_close → đóng cả primary.
+       → Fix: guard_fn=lambda: bool(_sub_windows) and _sub_windows[-1] is not win
+         (sub không tự đóng khi nó không phải sub cuối cùng trong stack).
+       → on_close của sub cuối: đóng tất cả subs còn lại + primary.
+       → Hoạt động với bất kỳ độ sâu nào (A→B→C→...).
+
+    ❌ ĐỪNG dùng is_active() trong _on_sub_focus_close:
+       → Sau khi sub destroy, GNOME tự restore focus về primary
+       → primary.is_active() = True dù user đã click ra ngoài.
+    ─────────────────────────────────────────────────────────────────────
+    """
     fc = Gtk.EventControllerFocus()
     def _on_leave(_):
-        if _opening_sub[0] or (guard_fn and guard_fn()):
+        if _opening_sub[0] or _dragging[0] or (guard_fn and guard_fn()):
             return
-        def _get_focused():
-            try: return Gdk.Display.get_default().get_focused_surface()
-            except: return None
         def _stage1():
             if _opening_sub[0] or (guard_fn and guard_fn()):
                 return False
-            focused = _get_focused()
-            if focused is not None:
-                win.close(); return False   # app khác focused → đóng
-            # None = workspace switch OR desktop → đợi thêm
-            GLib.timeout_add(700, _stage2)
+            if not win.is_active():
+                GLib.timeout_add(700, _stage2)   # chưa chắc → đợi thêm
             return False
         def _stage2():
             if _opening_sub[0] or (guard_fn and guard_fn()):
                 return False
-            # Workspace switch: user quay lại → win.is_active() = True
-            # Desktop click: win không bao giờ active lại → đóng
-            if not win.is_active():
+            if not win.is_active():              # vẫn không active → đóng
                 win.close()
+                if on_close: on_close()          # báo cho caller biết popup bị đóng do focus-out
             return False
         GLib.timeout_add(200, _stage1)
     fc.connect("leave", _on_leave)
@@ -121,6 +183,7 @@ def _focus_esc(win, guard_fn=None):
     kc.connect("key-pressed",
                lambda c, k, *_: win.close() if k == Gdk.KEY_Escape else None)
     win.add_controller(kc)
+
 
 # ── StreamRenderer ────────────────────────────────────────────────────
 class StreamRenderer:
@@ -260,7 +323,7 @@ class BasePopup(Gtk.ApplicationWindow):
         self.set_default_size(width, -1)
         self.root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.set_child(self.root)
-        _hdr(self.root, text, width, self.close, extra_btns=extra_btns)
+        _hdr(self.root, text, width, self.close, win=self, extra_btns=extra_btns)
 
         sc = Gtk.ScrolledWindow()
         sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -345,7 +408,7 @@ class SubWordWindow(Gtk.ApplicationWindow):
 
         self.root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.set_child(self.root)
-        _hdr(self.root, label, config.POPUP_WORD_WIDTH, self.close,
+        _hdr(self.root, label, config.POPUP_WORD_WIDTH, self.close, win=self,
              extra_btns=[("🔊", lambda: _tts.speak(label))])
 
         sc = Gtk.ScrolledWindow()
@@ -376,11 +439,7 @@ class SubWordWindow(Gtk.ApplicationWindow):
         self._buf.connect("notify::has-selection",
                           lambda b, *_: self._lkbar.set_visible(b.get_has_selection()))
 
-        # ESC only — no focus-out close
-        kc = Gtk.EventControllerKey()
-        kc.connect("key-pressed",
-                   lambda c, k, *_: self.close() if k == Gdk.KEY_Escape else None)
-        self.add_controller(kc)
+        # focus-out + ESC được gán bởi _open_sub() qua _focus_esc()
 
     def _on_lookup(self, _):
         if not self._buf.get_has_selection(): return
@@ -416,6 +475,24 @@ def _open_sub(text: str):
         _sub_windows.append(win)
     finally:
         _opening_sub[0] = False
+    def _on_sub_focus_close():
+        # Sub cuối bị đóng do focus-out → đóng tất cả subs + primary.
+        # Không check len: on_close chỉ được gọi từ sub cuối (guard bên dưới đảm bảo).
+        for w in list(_sub_windows):
+            try: w.close()
+            except Exception: pass
+        wins = _main_app.get_windows() if _main_app else []
+        main_win = wins[0] if wins else None
+        if main_win:
+            try: main_win.close()
+            except Exception: pass
+    # Guard: chỉ sub KHÔNG phải cuối mới được bảo vệ (không tự đóng khi sub mới mở).
+    # Sub cuối (_sub_windows[-1] is win) → không guard → close được khi click outside.
+    # Hoạt động với bất kỳ chiều sâu nào (A→B→C→...).
+    _focus_esc(win,
+               guard_fn=lambda: bool(_sub_windows) and _sub_windows[-1] is not win,
+               on_close=_on_sub_focus_close)
+
     win.connect("destroy", lambda w: _sub_windows.remove(w) if w in _sub_windows else None)
     win.present()
     is_para = len(text.split()) > config.WORD_THRESHOLD
