@@ -146,10 +146,11 @@ class StreamRenderer:
     TICK_MS        = 16
     CHARS_PER_TICK = 4
 
-    def __init__(self, buf, tgs):
+    def __init__(self, buf, tgs, skip_sections=None):
         self.buf     = buf
         self.tgs     = tgs
         self.section = None
+        self._skip   = skip_sections or set()
         self._pending = ""
         self._queue   = []
         self._timer   = None
@@ -202,6 +203,8 @@ class StreamRenderer:
         m = SECTION_RE.match(stripped.strip())
         if m:
             self.section = m.group(1)
+            if self.section in self._skip:
+                return   # bỏ qua section bị skip
             cefr  = m.group(2) or ""
             label = self.SECTION_LABELS[self.section]
             if label is None:
@@ -216,6 +219,9 @@ class StreamRenderer:
 
         if not stripped.strip() or not self.section:
             return  # bỏ qua empty lines
+
+        if self.section in self._skip:
+            return  # bỏ qua content của section bị skip
 
         tag_name = self.SECTION_TAG.get(self.section, "txt")
 
@@ -264,7 +270,8 @@ class BasePopup(Gtk.ApplicationWindow):
         sc.set_child(self._tv)
 
         self._tgs = _tags(self._buf)
-        self._renderer = StreamRenderer(self._buf, self._tgs)
+        self._renderer = StreamRenderer(self._buf, self._tgs,
+                                        skip_sections=getattr(self, "_skip_sections", None))
         _ins(self._buf, "⏳  Analyzing…", self._tgs["dim"])
 
         # Lookup bar
@@ -319,6 +326,7 @@ class WordPopup(BasePopup):
 # ── ParagraphPopup ────────────────────────────────────────────────────
 class ParagraphPopup(BasePopup):
     def __init__(self, app, text):
+        self._skip_sections = {"PHONETIC"}
         super().__init__(app, text, config.POPUP_PARA_WIDTH)
 
 # ── SubWordWindow ─────────────────────────────────────────────────────
