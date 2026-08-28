@@ -209,6 +209,11 @@ class StreamRenderer:
             label = self.SECTION_LABELS[self.section]
             if label is None:
                 return   # PHONETIC: no header label
+            # Đảm bảo section header luôn ở dòng mới
+            si = self.buf.get_start_iter(); ei = self.buf.get_end_iter()
+            cur = self.buf.get_text(si, ei, False)
+            if cur and not cur.endswith("\n"):
+                _ins(self.buf, "\n", self.tgs["txt"])
             header = label + (f"  [{cefr}]" if cefr else "") + "\n"
             _ins(self.buf, header, self.tgs["sec"])
             return
