@@ -332,7 +332,8 @@ class WordPopup(BasePopup):
 class ParagraphPopup(BasePopup):
     def __init__(self, app, text):
         self._skip_sections = {"PHONETIC"}
-        super().__init__(app, text, config.POPUP_PARA_WIDTH)
+        super().__init__(app, text, config.POPUP_PARA_WIDTH,
+                         extra_btns=[("🔊", lambda: _tts.speak(text))])
 
 # ── SubWordWindow ─────────────────────────────────────────────────────
 class SubWordWindow(Gtk.ApplicationWindow):
