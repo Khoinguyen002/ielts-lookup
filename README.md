@@ -4,7 +4,7 @@ GNOME Wayland popup tool tra từ / dịch đoạn văn nhanh, dùng OpenRouter 
 
 ## Features
 
-- **Alt+S** — Tra từ/đoạn đang bôi chọn (primary selection)
+- **Alt+S** — Tra từ/đoạn đang bôi chọn (primary selection hoặc Ctrl+C fallback cho PDF viewer)
 - **Alt+A** — OCR screenshot → dịch (XDG portal)
 - Auto-detect: ≤6 từ → Word mode, >6 từ → Paragraph mode
 - Typewriter streaming effect
@@ -28,7 +28,7 @@ main.py       — Entry point, parse args, dispatch word/para popup
 config.py     — API key, models, system prompts, thresholds
 api.py        — OpenRouter SSE streaming, fallback routing
 popup.py      — GTK4 popup UI, StreamRenderer, focus management
-clipboard.py  — wl-paste primary selection
+clipboard.py  — wl-paste primary selection + clipboard fallback
 tts.py        — Google TTS + ffplay pronunciation
 ```
 
